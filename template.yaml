@@ -1,0 +1,156 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Template to prepare CodeCommit repositories and CI/CD pipeline for
+  Cloudformation stack. User name to log in to OpenVpn is 'openvpn'. SSH username
+  is 'openvpnas'.
+
+
+##############################
+#
+# Parameters
+#
+##############################
+
+Parameters:
+  UserPassword:
+    Description: >
+      Password that will be used with 'openvpn' user to log in to openvpn network
+      and in administrative purposes.
+    Type: String
+
+  InstanceAccessKeyName:
+    Description: >
+      Name of the keypair that will be used to establish ssh connection.
+    Type: String
+
+
+##############################
+#
+# Resources
+#
+##############################
+
+Resources:
+  OpenVpnSecurtyGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: OpenVpnSecurtyGroup
+      GroupDescription: Minimal access to OpenVpn server.
+      SecurityGroupIngress:
+        -
+          Description: Access to OpenVpn server default udp port
+          CidrIp: 0.0.0.0/0
+          FromPort: 1194
+          ToPort: 1194
+          IpProtocol: udp
+        -
+          Description: Access to OpenVpn server 443 tcp port
+          CidrIp: 0.0.0.0/0
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+        -
+          Description: Ssh access to OpenVpn server
+          CidrIp: 0.0.0.0/0
+          FromPort: 22
+          ToPort: 22
+          IpProtocol: tcp
+      Tags:
+        -
+          Key: Name
+          Value: OpenVpnSecurtyGroup
+
+
+
+  OpenVpnInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-07a8d85046c8ecc99
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: t2.small
+      SecurityGroups:
+        - !Ref OpenVpnSecurtyGroup
+      KeyName: !Sub ${InstanceAccessKeyName}
+      UserData:
+        Fn::Base64:
+          !Sub |
+            Content-Type: multipart/mixed; boundary="//"
+            MIME-Version: 1.0
+
+            --//
+            Content-Type: text/cloud-config; charset="us-ascii"
+            MIME-Version: 1.0
+            Content-Transfer-Encoding: 7bit
+            Content-Disposition: attachment; filename="cloud-config.txt"
+
+            #cloud-config
+            cloud_final_modules:
+            - [scripts-user, always]
+
+            --//
+            Content-Type: text/x-shellscript; charset="us-ascii"
+            MIME-Version: 1.0
+            Content-Transfer-Encoding: 7bit
+            Content-Disposition: attachment; filename="userdata.txt"
+
+            #!/bin/bash
+            #
+            # The echo below allows to automatically answer for questions in
+            # the ovpn configuration script. It simulates user keyboard
+            # interaction.
+            #
+
+            echo 'yes
+            yes
+            2
+            943
+            443
+            yes
+            yes
+            yes
+            yes
+            yes
+
+            ' | ovpn-init --force --ec2
+            echo 'openvpn:${UserPassword}' | chpasswd
+
+            # Will be used to update dns addresses
+            apt update
+            apt -y install sqlite3
+
+            # Inserting dns addresses
+            sqlite3 /usr/local/openvpn_as/etc/db/config.db \
+              '
+              update config
+                set "value" = "custom"
+                where "name" = "vpn.client.routing.reroute_dns" ;
+              insert into config
+                 values ("1", "vpn.server.dhcp_option.dns.0", "80.80.80.80");
+              insert into config
+                 values ("1", "vpn.server.dhcp_option.dns.1", "80.80.81.81");
+              insert into config
+                 values ("1", "vpn.server.routing.gateway_access", "true");
+              '
+
+            systemctl restart openvpnas.service
+
+            --//
+      Tags:
+        -
+          Key: Name
+          Value: openvpn-as-server
+
+
+##############################
+#
+# Outputs
+#
+##############################
+
+Outputs:
+  OpenvpnIpAddr:
+    Description: >
+      IP address of the openvpn server that will be used to log in to
+      private network.
+    Value: !GetAtt OpenVpnInstance.PublicIp
